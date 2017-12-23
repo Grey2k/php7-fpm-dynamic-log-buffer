@@ -1,0 +1,379 @@
+diff --git a/sapi/fpm/fpm/fpm.c b/sapi/fpm/fpm/fpm.c
+index e43eb5a86d..92919ebccf 100644
+--- a/sapi/fpm/fpm/fpm.c
++++ b/sapi/fpm/fpm/fpm.c
+@@ -33,6 +33,7 @@ struct fpm_globals_s fpm_globals = {
+ 	.running_children = 0,
+ 	.error_log_fd = 0,
+ 	.log_level = 0,
++	.log_buffer_length = 0,
+ 	.listening_socket = 0,
+ 	.max_requests = 0,
+ 	.is_child = 0,
+diff --git a/sapi/fpm/fpm/fpm.h b/sapi/fpm/fpm/fpm.h
+index 4916140e17..b1f221af6c 100644
+--- a/sapi/fpm/fpm/fpm.h
++++ b/sapi/fpm/fpm/fpm.h
+@@ -49,6 +49,7 @@ struct fpm_globals_s {
+ 	int running_children;
+ 	int error_log_fd;
+ 	int log_level;
++	int log_buffer_length;
+ 	int listening_socket; /* for this child */
+ 	int max_requests; /* for this child */
+ 	int is_child;
+diff --git a/sapi/fpm/fpm/fpm_conf.c b/sapi/fpm/fpm/fpm_conf.c
+index b497d2c82c..7dfb1b8a1f 100644
+--- a/sapi/fpm/fpm/fpm_conf.c
++++ b/sapi/fpm/fpm/fpm_conf.c
+@@ -99,6 +99,7 @@ static struct ini_value_parser_s ini_fpm_global_options[] = {
+ 	{ "syslog.facility",             &fpm_conf_set_syslog_facility, GO(syslog_facility) },
+ #endif
+ 	{ "log_level",                   &fpm_conf_set_log_level,       GO(log_level) },
++	{ "log_buffer_length",           &fpm_conf_set_integer,         GO(log_buffer_length) },
+ 	{ "emergency_restart_threshold", &fpm_conf_set_integer,         GO(emergency_restart_threshold) },
+ 	{ "emergency_restart_interval",  &fpm_conf_set_time,            GO(emergency_restart_interval) },
+ 	{ "process_control_timeout",     &fpm_conf_set_time,            GO(process_control_timeout) },
+@@ -1167,6 +1168,17 @@ static int fpm_conf_post_process(int force_daemon) /* {{{ */
+ 	fpm_globals.log_level = fpm_global_config.log_level;
+ 	zlog_set_level(fpm_globals.log_level);
+ 
++	if (!fpm_global_config.log_buffer_length) {
++		fpm_global_config.log_buffer_length = MIN_LINE_LENGTH;
++	} else {
++		if (fpm_global_config.log_buffer_length < MIN_LINE_LENGTH || fpm_global_config.log_buffer_length > MAX_LINE_LENGTH) {
++			fpm_globals.log_buffer_length = MIN_LINE_LENGTH; /* fallback to min value */
++			zlog(ZLOG_ERROR, "log_buffer_length must be included into [%d,%d]", MIN_LINE_LENGTH, MAX_LINE_LENGTH);
++			return -1;
++		}
++	}
++	fpm_globals.log_buffer_length = fpm_global_config.log_buffer_length;
++
+ 	if (fpm_global_config.process_max < 0) {
+ 		zlog(ZLOG_ERROR, "process_max can't be negative");
+ 		return -1;
+@@ -1581,6 +1593,7 @@ static void fpm_conf_dump() /* {{{ */
+ 	zlog(ZLOG_NOTICE, "\tsyslog.facility = %d",             fpm_global_config.syslog_facility); /* FIXME: convert to string */
+ #endif
+ 	zlog(ZLOG_NOTICE, "\tlog_level = %s",                   zlog_get_level_name(fpm_globals.log_level));
++	zlog(ZLOG_NOTICE, "\tlog_buffer_length = %d",           fpm_global_config.log_buffer_length);
+ 	zlog(ZLOG_NOTICE, "\temergency_restart_interval = %ds", fpm_global_config.emergency_restart_interval);
+ 	zlog(ZLOG_NOTICE, "\temergency_restart_threshold = %d", fpm_global_config.emergency_restart_threshold);
+ 	zlog(ZLOG_NOTICE, "\tprocess_control_timeout = %ds",    fpm_global_config.process_control_timeout);
+diff --git a/sapi/fpm/fpm/fpm_conf.h b/sapi/fpm/fpm/fpm_conf.h
+index 540b22795d..b5ae2e017d 100644
+--- a/sapi/fpm/fpm/fpm_conf.h
++++ b/sapi/fpm/fpm/fpm_conf.h
+@@ -31,6 +31,7 @@ struct fpm_global_config_s {
+ 	int syslog_facility;
+ #endif
+ 	int log_level;
++	int log_buffer_length;
+ 	int emergency_restart_threshold;
+ 	int emergency_restart_interval;
+ 	int process_control_timeout;
+diff --git a/sapi/fpm/fpm/fpm_log.c b/sapi/fpm/fpm/fpm_log.c
+index 02f8868142..ed3160c555 100644
+--- a/sapi/fpm/fpm/fpm_log.c
++++ b/sapi/fpm/fpm/fpm_log.c
+@@ -12,6 +12,7 @@
+ #include <sys/times.h>
+ #endif
+ 
++#include "fpm.h"
+ #include "fpm_config.h"
+ #include "fpm_log.h"
+ #include "fpm_clock.h"
+@@ -21,12 +22,6 @@
+ #include "fastcgi.h"
+ #include "zlog.h"
+ 
+-#ifdef MAX_LINE_LENGTH
+-# define FPM_LOG_BUFFER MAX_LINE_LENGTH
+-#else
+-# define FPM_LOG_BUFFER 1024
+-#endif
+-
+ static char *fpm_log_format = NULL;
+ static int fpm_log_fd = -1;
+ 
+@@ -100,7 +95,9 @@ int fpm_log_init_child(struct fpm_worker_pool_s *wp)  /* {{{ */
+ int fpm_log_write(char *log_format) /* {{{ */
+ {
+ 	char *s, *b;
+-	char buffer[FPM_LOG_BUFFER+1];
++	int fpm_log_buffer;
++	fpm_log_buffer = fpm_globals.log_buffer_length;
++	char buffer[fpm_log_buffer+1];
+ 	int token, test;
+ 	size_t len, len2;
+ 	struct fpm_scoreboard_proc_s proc, *proc_p;
+@@ -151,9 +148,9 @@ int fpm_log_write(char *log_format) /* {{{ */
+ 
+ 	while (*s != '\0') {
+ 		/* Test is we have place for 1 more char. */
+-		if (len >= FPM_LOG_BUFFER) {
+-			zlog(ZLOG_NOTICE, "the log buffer is full (%d). The access log request has been truncated.", FPM_LOG_BUFFER);
+-			len = FPM_LOG_BUFFER;
++		if (len >= fpm_log_buffer) {
++			zlog(ZLOG_NOTICE, "the log buffer is full (%d). The access log request has been truncated.", fpm_log_buffer);
++			len = fpm_log_buffer;
+ 			break;
+ 		}
+ 
+@@ -195,7 +192,7 @@ int fpm_log_write(char *log_format) /* {{{ */
+ 
+ 					format[0] = '\0';
+ 					if (!test) {
+-						len2 = snprintf(b, FPM_LOG_BUFFER - len, "%.2f", tms_total / fpm_scoreboard_get_tick() / (proc.cpu_duration.tv_sec + proc.cpu_duration.tv_usec / 1000000.) * 100.);
++						len2 = snprintf(b, fpm_log_buffer - len, "%.2f", tms_total / fpm_scoreboard_get_tick() / (proc.cpu_duration.tv_sec + proc.cpu_duration.tv_usec / 1000000.) * 100.);
+ 					}
+ 					break;
+ #endif
+@@ -204,19 +201,19 @@ int fpm_log_write(char *log_format) /* {{{ */
+ 					/* seconds */
+ 					if (format[0] == '\0' || !strcasecmp(format, "seconds")) {
+ 						if (!test) {
+-							len2 = snprintf(b, FPM_LOG_BUFFER - len, "%.3f", proc.duration.tv_sec + proc.duration.tv_usec / 1000000.);
++							len2 = snprintf(b, fpm_log_buffer - len, "%.3f", proc.duration.tv_sec + proc.duration.tv_usec / 1000000.);
+ 						}
+ 
+ 					/* miliseconds */
+ 					} else if (!strcasecmp(format, "miliseconds") || !strcasecmp(format, "mili")) {
+ 						if (!test) {
+-							len2 = snprintf(b, FPM_LOG_BUFFER - len, "%.3f", proc.duration.tv_sec * 1000. + proc.duration.tv_usec / 1000.);
++							len2 = snprintf(b, fpm_log_buffer - len, "%.3f", proc.duration.tv_sec * 1000. + proc.duration.tv_usec / 1000.);
+ 						}
+ 
+ 					/* microseconds */
+ 					} else if (!strcasecmp(format, "microseconds") || !strcasecmp(format, "micro")) {
+ 						if (!test) {
+-							len2 = snprintf(b, FPM_LOG_BUFFER - len, "%lu", proc.duration.tv_sec * 1000000UL + proc.duration.tv_usec);
++							len2 = snprintf(b, fpm_log_buffer - len, "%lu", proc.duration.tv_sec * 1000000UL + proc.duration.tv_usec);
+ 						}
+ 
+ 					} else {
+@@ -234,26 +231,26 @@ int fpm_log_write(char *log_format) /* {{{ */
+ 
+ 					if (!test) {
+ 						char *env = fcgi_getenv((fcgi_request*) SG(server_context), format, strlen(format));
+-						len2 = snprintf(b, FPM_LOG_BUFFER - len, "%s", env ? env : "-");
++						len2 = snprintf(b, fpm_log_buffer - len, "%s", env ? env : "-");
+ 					}
+ 					format[0] = '\0';
+ 					break;
+ 
+ 				case 'f': /* script */
+ 					if (!test) {
+-						len2 = snprintf(b, FPM_LOG_BUFFER - len, "%s",  *proc.script_filename ? proc.script_filename : "-");
++						len2 = snprintf(b, fpm_log_buffer - len, "%s",  *proc.script_filename ? proc.script_filename : "-");
+ 					}
+ 					break;
+ 
+ 				case 'l': /* content length */
+ 					if (!test) {
+-						len2 = snprintf(b, FPM_LOG_BUFFER - len, "%zu", proc.content_length);
++						len2 = snprintf(b, fpm_log_buffer - len, "%zu", proc.content_length);
+ 					}
+ 					break;
+ 
+ 				case 'm': /* method */
+ 					if (!test) {
+-						len2 = snprintf(b, FPM_LOG_BUFFER - len, "%s", *proc.request_method ? proc.request_method : "-");
++						len2 = snprintf(b, fpm_log_buffer - len, "%s", *proc.request_method ? proc.request_method : "-");
+ 					}
+ 					break;
+ 
+@@ -261,19 +258,19 @@ int fpm_log_write(char *log_format) /* {{{ */
+ 					/* seconds */
+ 					if (format[0] == '\0' || !strcasecmp(format, "bytes")) {
+ 						if (!test) {
+-							len2 = snprintf(b, FPM_LOG_BUFFER - len, "%zu", proc.memory);
++							len2 = snprintf(b, fpm_log_buffer - len, "%zu", proc.memory);
+ 						}
+ 
+ 					/* kilobytes */
+ 					} else if (!strcasecmp(format, "kilobytes") || !strcasecmp(format, "kilo")) {
+ 						if (!test) {
+-							len2 = snprintf(b, FPM_LOG_BUFFER - len, "%zu", proc.memory / 1024);
++							len2 = snprintf(b, fpm_log_buffer - len, "%zu", proc.memory / 1024);
+ 						}
+ 
+ 					/* megabytes */
+ 					} else if (!strcasecmp(format, "megabytes") || !strcasecmp(format, "mega")) {
+ 						if (!test) {
+-							len2 = snprintf(b, FPM_LOG_BUFFER - len, "%zu", proc.memory / 1024 / 1024);
++							len2 = snprintf(b, fpm_log_buffer - len, "%zu", proc.memory / 1024 / 1024);
+ 						}
+ 
+ 					} else {
+@@ -285,7 +282,7 @@ int fpm_log_write(char *log_format) /* {{{ */
+ 
+ 				case 'n': /* pool name */
+ 					if (!test) {
+-						len2 = snprintf(b, FPM_LOG_BUFFER - len, "%s", scoreboard->pool[0] ? scoreboard->pool : "-");
++						len2 = snprintf(b, fpm_log_buffer - len, "%s", scoreboard->pool[0] ? scoreboard->pool : "-");
+ 					}
+ 					break;
+ 
+@@ -324,7 +321,7 @@ int fpm_log_write(char *log_format) /* {{{ */
+ 							}
+ 
+ 							header = h->header + format_len + 2;
+-							len2 = snprintf(b, FPM_LOG_BUFFER - len, "%s", header && *header ? header : "-");
++							len2 = snprintf(b, fpm_log_buffer - len, "%s", header && *header ? header : "-");
+ 
+ 							/* found, done */
+ 							break;
+@@ -339,44 +336,44 @@ int fpm_log_write(char *log_format) /* {{{ */
+ 
+ 				case 'p': /* PID */
+ 					if (!test) {
+-						len2 = snprintf(b, FPM_LOG_BUFFER - len, "%ld", (long)getpid());
++						len2 = snprintf(b, fpm_log_buffer - len, "%ld", (long)getpid());
+ 					}
+ 					break;
+ 
+ 				case 'P': /* PID */
+ 					if (!test) {
+-						len2 = snprintf(b, FPM_LOG_BUFFER - len, "%ld", (long)getppid());
++						len2 = snprintf(b, fpm_log_buffer - len, "%ld", (long)getppid());
+ 					}
+ 					break;
+ 
+ 				case 'q': /* query_string */
+ 					if (!test) {
+-						len2 = snprintf(b, FPM_LOG_BUFFER - len, "%s", proc.query_string);
++						len2 = snprintf(b, fpm_log_buffer - len, "%s", proc.query_string);
+ 					}
+ 					break;
+ 
+ 				case 'Q': /* '?' */
+ 					if (!test) {
+-						len2 = snprintf(b, FPM_LOG_BUFFER - len, "%s", *proc.query_string  ? "?" : "");
++						len2 = snprintf(b, fpm_log_buffer - len, "%s", *proc.query_string  ? "?" : "");
+ 					}
+ 					break;
+ 
+ 				case 'r': /* request URI */
+ 					if (!test) {
+-						len2 = snprintf(b, FPM_LOG_BUFFER - len, "%s", proc.request_uri);
++						len2 = snprintf(b, fpm_log_buffer - len, "%s", proc.request_uri);
+ 					}
+ 					break;
+ 
+ 				case 'R': /* remote IP address */
+ 					if (!test) {
+ 						const char *tmp = fcgi_get_last_client_ip();
+-						len2 = snprintf(b, FPM_LOG_BUFFER - len, "%s", tmp ? tmp : "-");
++						len2 = snprintf(b, fpm_log_buffer - len, "%s", tmp ? tmp : "-");
+ 					}
+ 					break;
+ 
+ 				case 's': /* status */
+ 					if (!test) {
+-						len2 = snprintf(b, FPM_LOG_BUFFER - len, "%d", SG(sapi_headers).http_response_code);
++						len2 = snprintf(b, fpm_log_buffer - len, "%d", SG(sapi_headers).http_response_code);
+ 					}
+ 					break;
+ 
+@@ -394,14 +391,14 @@ int fpm_log_write(char *log_format) /* {{{ */
+ 						} else {
+ 							strftime(tmp, sizeof(tmp) - 1, format, localtime(t));
+ 						}
+-						len2 = snprintf(b, FPM_LOG_BUFFER - len, "%s", tmp);
++						len2 = snprintf(b, fpm_log_buffer - len, "%s", tmp);
+ 					}
+ 					format[0] = '\0';
+ 					break;
+ 
+ 				case 'u': /* remote user */
+ 					if (!test) {
+-						len2 = snprintf(b, FPM_LOG_BUFFER - len, "%s", proc.auth_user);
++						len2 = snprintf(b, fpm_log_buffer - len, "%s", proc.auth_user);
+ 					}
+ 					break;
+ 
+@@ -448,9 +445,9 @@ int fpm_log_write(char *log_format) /* {{{ */
+ 				b += len2;
+ 				len += len2;
+ 			}
+-			if (len >= FPM_LOG_BUFFER) {
+-				zlog(ZLOG_NOTICE, "the log buffer is full (%d). The access log request has been truncated.", FPM_LOG_BUFFER);
+-				len = FPM_LOG_BUFFER;
++			if (len >= fpm_log_buffer) {
++				zlog(ZLOG_NOTICE, "the log buffer is full (%d). The access log request has been truncated.", fpm_log_buffer);
++				len = fpm_log_buffer;
+ 				break;
+ 			}
+ 			continue;
+diff --git a/sapi/fpm/fpm/fpm_stdio.c b/sapi/fpm/fpm/fpm_stdio.c
+index 40720176e1..8e24543617 100644
+--- a/sapi/fpm/fpm/fpm_stdio.c
++++ b/sapi/fpm/fpm/fpm_stdio.c
+@@ -115,7 +115,7 @@ int fpm_stdio_init_child(struct fpm_worker_pool_s *wp) /* {{{ */
+ 
+ static void fpm_stdio_child_said(struct fpm_event_s *ev, short which, void *arg) /* {{{ */
+ {
+-	static const int max_buf_size = 1024;
++	int max_buf_size = fpm_globals.log_buffer_length;
+ 	int fd = ev->fd;
+ 	char buf[max_buf_size];
+ 	struct fpm_child_s *child;
+diff --git a/sapi/fpm/fpm/zlog.c b/sapi/fpm/fpm/zlog.c
+index 4884dca856..eb1ece57c6 100644
+--- a/sapi/fpm/fpm/zlog.c
++++ b/sapi/fpm/fpm/zlog.c
+@@ -18,8 +18,6 @@
+ #include "fpm.h"
+ #include "zend_portability.h"
+ 
+-#define MAX_LINE_LENGTH 1024
+-
+ static int zlog_fd = -1;
+ static int zlog_level = ZLOG_NOTICE;
+ static int launched = 0;
+@@ -101,9 +99,11 @@ int zlog_set_level(int new_value) /* {{{ */
+ 
+ void vzlog(const char *function, int line, int flags, const char *fmt, va_list args) /* {{{ */
+ {
++	int fpm_log_buffer;
++	fpm_log_buffer = fpm_globals.log_buffer_length;
+ 	struct timeval tv;
+-	char buf[MAX_LINE_LENGTH];
+-	const size_t buf_size = MAX_LINE_LENGTH;
++	char buf[fpm_log_buffer];
++	const size_t buf_size = fpm_log_buffer;
+ 	size_t len = 0;
+ 	int truncated = 0;
+ 	int saved_errno;
+diff --git a/sapi/fpm/fpm/zlog.h b/sapi/fpm/fpm/zlog.h
+index c2bf752b93..4fadab1d30 100644
+--- a/sapi/fpm/fpm/zlog.h
++++ b/sapi/fpm/fpm/zlog.h
+@@ -7,6 +7,9 @@
+ 
+ #include <stdarg.h>
+ 
++#define MIN_LINE_LENGTH 1024
++#define MAX_LINE_LENGTH (1024 * 16)
++
+ #define zlog(flags,...) zlog_ex(__func__, __LINE__, flags, __VA_ARGS__)
+ 
+ struct timeval;
+diff --git a/sapi/fpm/php-fpm.conf.in b/sapi/fpm/php-fpm.conf.in
+index 56c18e862a..cc13a2c792 100644
+--- a/sapi/fpm/php-fpm.conf.in
++++ b/sapi/fpm/php-fpm.conf.in
+@@ -41,6 +41,11 @@
+ ; Default Value: notice
+ ;log_level = notice
+ 
++; Log buffer length
++; The value can vary from 1024 (default minimum) to 16384 (max).
++; Default Value: 1024
++;log_buffer_length = 1024
++
+ ; If this number of child processes exit with SIGSEGV or SIGBUS within the time
+ ; interval set by emergency_restart_interval then FPM will restart. A value
+ ; of '0' means 'Off'.
