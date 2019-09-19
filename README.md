@@ -1,6 +1,16 @@
 php7-fpm-dynamic-log-buffer
 ===========================
 
+
+DEPRECATION NOTICE
+------------------
+
+This repository is deprecated due to end of support for PHP 7.1 on December 1, 2019. You should migrate to PHP 7.3 which introduces  `log_limit` setting.
+
+
+Description
+-----------
+
 When using PHP applications in containerized environment you should write logs to STDERR. If
 you want to collect logs via Logstash and store them in Elasticsearch you may encounter a problem
 when messages are truncated or split because they exceed the default buffer limit of 1024 characters.
